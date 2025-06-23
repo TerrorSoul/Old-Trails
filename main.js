@@ -37,7 +37,7 @@ async function setActivity(details, state) {
         state,
         startTimestamp: gameStartTime,
         largeImageKey: 'trailmakers-logo', 
-        largeImageText: 'Old Trails Downloader',
+        largeImageText: 'Old Trails',
         instance: false,
     }).catch(console.error);
 }
@@ -367,21 +367,37 @@ ipcMain.handle('select-folder', async () => {
 });
 
 ipcMain.handle('get-installed-versions', (event, downloadPath) => {
-    if (!downloadPath || !fs.existsSync(downloadPath)) return [];
-    const installed = [];
+    if (!downloadPath) return [];
+    
     try {
         const directories = fs.readdirSync(downloadPath, { withFileTypes: true });
+        const installed = [];
         for (const version of trailmakersVersions) {
             const folderName = getSafeFolderName(version.name);
             if (directories.some(dir => dir.isDirectory() && dir.name === folderName)) {
                 installed.push(version.manifestId);
             }
         }
+        return installed;
     } catch (error) {
         console.error("Failed to scan for installed versions:", error);
+
+        dialog.showErrorBox(
+            'Folder Access Error',
+            `The application could not read the contents of your selected folder:\n\n` +
+            `${downloadPath}\n\n` +
+            `Please check the following:\n` +
+            `1. The folder and drive exist and are connected.\n` +
+            `2. You have read permissions for this folder.\n` +
+            `3. Your antivirus is not blocking the application.\n\n` +
+            `You can try running the application as an administrator.\n\n` +
+            `Error details: ${error.message}`
+        );
+
+        return [];
     }
-    return installed;
 });
+
 
 ipcMain.on('launch-game', async (event, { downloadPath, versionName }) => {
     const folderName = getSafeFolderName(versionName);
@@ -613,7 +629,6 @@ ipcMain.on('submit-steam-guard', (event, code) => {
     }
 });
 
-// --- Discord RPC Connection ---
 rpc.on('ready', () => {
     console.log('Discord RPC is ready.');
     rpcReady = true;
