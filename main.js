@@ -36,8 +36,8 @@ async function setActivity(details, state) {
         details,
         state,
         startTimestamp: gameStartTime,
-        largeImageKey: 'trailmakers-logo',
-        largeImageText: 'Old Trails',
+        largeImageKey: 'trailmakers-logo', 
+        largeImageText: 'Old Trails Downloader',
         instance: false,
     }).catch(console.error);
 }
@@ -137,6 +137,23 @@ function findFileRecursive(startPath, filter) {
     }
     return results;
 }
+
+async function retryOperation(action, retries = 5, delay = 300) {
+    for (let i = 0; i < retries; i++) {
+        try {
+            await action();
+            return; 
+        } catch (error) {
+            if (error.code === 'EPERM' && i < retries - 1) {
+                console.log(`Operation failed with EPERM, retrying in ${delay}ms... (Attempt ${i + 1}/${retries})`);
+                await new Promise(resolve => setTimeout(resolve, delay));
+            } else {
+                throw error;
+            }
+        }
+    }
+}
+
 
 // --- SAVE MANAGEMENT LOGIC ---
 const LOCAL_LOW_PATH = path.join(app.getPath('appData'), '..', 'LocalLow', 'Flashbulb', 'Trailmakers');
@@ -530,6 +547,9 @@ ipcMain.on('start-download', async (event, { username, password, version, downlo
         if (output.includes('Use the Steam Mobile App to confirm your sign in...')) {
             sendStatus('Mobile confirmation required...');
             event.reply('steam-mobile-required');
+        } else if (output.includes('auth code sent to the email')) {
+            sendStatus('Email confirmation required...');
+            event.reply('steam-email-required');
         } else if (output.includes('Enter 2FA code:') || output.includes('Please enter your 2-factor auth code')) {
             sendStatus('Authentication required...');
             event.reply('steam-guard-required');
@@ -550,40 +570,40 @@ ipcMain.on('start-download', async (event, { username, password, version, downlo
         stderrOutput += data.toString();
         handleOutput(data);
     });
-    downloadProcess.on('close', (code) => {
+    downloadProcess.on('close', async (code) => {
         setActivity('Browsing old versions', 'In the launcher');
-        setTimeout(() => {
-            if (code === 0) {
-                try {
-                    const downloadedContentPath = tempDownloadDir;
-                    const finalVersionPath = path.join(downloadPath, getSafeFolderName(version.name));
-                    if (!fs.existsSync(path.join(downloadedContentPath, 'Trailmakers.exe'))) {
-                         throw new Error(`Download finished, but Trailmakers.exe was not found.`);
-                    }
-                    fs.renameSync(downloadedContentPath, finalVersionPath);
-                    const crackedApiLibPath = path.join(resourcesPath, 'steam_api64.dll');
-                    sendStatus('Applying patch...');
-                    const originalLibName = 'steam_api64.dll';
-                    const results = findFileRecursive(finalVersionPath, originalLibName);
-                    if (results && results.length > 0) {
-                        fs.copyFileSync(crackedApiLibPath, results[0]);
-                    } else {
-                        fs.copyFileSync(crackedApiLibPath, path.join(finalVersionPath, originalLibName));
-                    }
-                    sendStatus('Installation Complete!');
-                    event.reply('download-complete', { success: true, installedManifestId: version.manifestId });
-                } catch (moveError) {
-                    console.error("File move/patch error:", moveError);
-                    sendStatus(`Error finalizing installation: ${moveError.message}`);
-                    event.reply('download-complete', { success: false });
+        if (code === 0) {
+            try {
+                const downloadedContentPath = tempDownloadDir;
+                const finalVersionPath = path.join(downloadPath, getSafeFolderName(version.name));
+                if (!fs.existsSync(path.join(downloadedContentPath, 'Trailmakers.exe'))) {
+                     throw new Error(`Download finished, but Trailmakers.exe was not found.`);
                 }
-            } else {
-                const finalError = stderrOutput.trim() || `Process exited with code ${code}.`;
-                sendStatus(`Download failed: ${finalError}`);
+                
+                await retryOperation(() => fs.renameSync(downloadedContentPath, finalVersionPath));
+
+                const crackedApiLibPath = path.join(resourcesPath, 'steam_api64.dll');
+                sendStatus('Applying patch...');
+                const originalLibName = 'steam_api64.dll';
+                const results = findFileRecursive(finalVersionPath, originalLibName);
+                if (results && results.length > 0) {
+                    fs.copyFileSync(crackedApiLibPath, results[0]);
+                } else {
+                    fs.copyFileSync(crackedApiLibPath, path.join(finalVersionPath, originalLibName));
+                }
+                sendStatus('Installation Complete!');
+                event.reply('download-complete', { success: true, installedManifestId: version.manifestId });
+            } catch (moveError) {
+                console.error("File move/patch error:", moveError);
+                sendStatus(`Error finalizing installation: ${moveError.message}`);
                 event.reply('download-complete', { success: false });
             }
-            downloadProcess = null;
-        }, 500);
+        } else {
+            const finalError = stderrOutput.trim() || `Process exited with code ${code}.`;
+            sendStatus(`Download failed: ${finalError}`);
+            event.reply('download-complete', { success: false });
+        }
+        downloadProcess = null;
     });
 });
 
@@ -593,6 +613,7 @@ ipcMain.on('submit-steam-guard', (event, code) => {
     }
 });
 
+// --- Discord RPC Connection ---
 rpc.on('ready', () => {
     console.log('Discord RPC is ready.');
     rpcReady = true;

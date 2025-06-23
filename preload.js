@@ -24,6 +24,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     onStatusUpdate: (callback) => ipcRenderer.on('status-update', (_event, value) => callback(value)),
     onSteamGuardRequired: (callback) => ipcRenderer.on('steam-guard-required', () => callback()),
     onSteamMobileRequired: (callback) => ipcRenderer.on('steam-mobile-required', () => callback()),
+    onSteamEmailRequired: (callback) => ipcRenderer.on('steam-email-required', () => callback()),
     onDownloadComplete: (callback) => ipcRenderer.on('download-complete', (_event, value) => callback(value)),
     onVersionsLoaded: (callback) => ipcRenderer.on('versions-loaded', (_event, value) => callback(value)),
     onDownloadProgress: (callback) => ipcRenderer.on('download-progress', (_event, value) => callback(value)),

@@ -70,6 +70,7 @@ const AuthPrompt = ({ onCodeSubmit, type }) => {
         setSteamGuardCode('');
     };
 
+    let promptText = "Please enter the code from your authenticator app.";
     if (type === 'mobile') {
         return (
             <div className="p-4 bg-gray-700/50 rounded-lg space-y-3 border border-yellow-500/30">
@@ -80,12 +81,15 @@ const AuthPrompt = ({ onCodeSubmit, type }) => {
             </div>
         );
     }
+    if (type === 'email') {
+        promptText = "Please enter the auth code sent to your email address.";
+    }
     
     return (
         <div className="p-4 bg-gray-700/50 rounded-lg space-y-3 border border-yellow-500/30">
             <div className="text-center">
                 <p className="font-semibold text-yellow-300">Authentication Required</p>
-                <p className="text-sm text-gray-300">Please enter the code from your authenticator app.</p>
+                <p className="text-sm text-gray-300">{promptText}</p>
             </div>
             <form onSubmit={handleSubmit} className="flex gap-2 items-center">
                 <input type="text" placeholder="Enter code here" value={steamGuardCode} onChange={(e) => setSteamGuardCode(e.target.value)} className="flex-grow min-w-0 bg-gray-800 border border-gray-600 rounded-md p-2 text-sm focus:ring-2 focus:ring-yellow-500 focus:outline-none" autoFocus />
@@ -107,7 +111,7 @@ function App() {
     const [currentDownload, setCurrentDownload] = useState(null);
     const [downloadProgress, setDownloadProgress] = useState(0);
     const [statusMessage, setStatusMessage] = useState('Welcome! Please enter your details.');
-    const [authPromptType, setAuthPromptType] = useState(null); // Can be 'code' or 'mobile'
+    const [authPromptType, setAuthPromptType] = useState(null);
     const [runningGame, setRunningGame] = useState(null);
 
     const downloadPathRef = useRef(downloadPath);
@@ -144,7 +148,6 @@ function App() {
 
         const handleStatusUpdate = (message) => {
             setStatusMessage(message);
-            // If we get a new status that isn't an auth request, hide the prompt.
             const lowerCaseMessage = message.toLowerCase();
             if (!lowerCaseMessage.includes('authentication required') && !lowerCaseMessage.includes('confirmation required')) {
                 setAuthPromptType(null);
@@ -167,12 +170,13 @@ function App() {
         window.electronAPI.onDownloadProgress(({ progress }) => setDownloadProgress(progress));
         window.electronAPI.onSteamGuardRequired(() => setAuthPromptType('code'));
         window.electronAPI.onSteamMobileRequired(() => setAuthPromptType('mobile'));
+        window.electronAPI.onSteamEmailRequired(() => setAuthPromptType('email'));
         window.electronAPI.onDownloadComplete(handleDownloadComplete);
         window.electronAPI.onGameLaunched(handleGameLaunched);
         window.electronAPI.onGameClosed(handleGameClosed);
 
         return () => {
-            ['versions-loaded', 'status-update', 'download-progress', 'steam-guard-required', 'steam-mobile-required', 'download-complete', 'game-launched', 'game-closed'].forEach(channel => 
+            ['versions-loaded', 'status-update', 'download-progress', 'steam-guard-required', 'steam-mobile-required', 'steam-email-required', 'download-complete', 'game-launched', 'game-closed'].forEach(channel => 
                 window.electronAPI.removeAllListeners(channel)
             );
         };
