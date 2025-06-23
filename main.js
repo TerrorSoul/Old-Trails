@@ -4,6 +4,7 @@ const fs = require('fs');
 const { spawn } = require('child_process');
 const Store = require('electron-store');
 const keytar = require('keytar');
+const DiscordRPC = require('discord-rpc');
 const store = new Store();
 
 const DEBUG_MODE = false;
@@ -17,7 +18,29 @@ const steamApiLib = isWindows ? 'steam_api64.dll' : 'libsteam_api.so';
 
 const KEYTAR_SERVICE = 'trailmakers-downloader';
 let mainWindow;
-let downloadProcess; 
+let downloadProcess;
+let activeGameProcess = null;
+let activeGameVersionName = null;
+let gameStartTime;
+
+// --- Discord RPC Setup ---
+const DISCORD_CLIENT_ID = '1386680522356424756';
+const rpc = new DiscordRPC.Client({ transport: 'ipc' });
+let rpcReady = false;
+
+async function setActivity(details, state) {
+    if (!rpcReady) {
+        return;
+    }
+    rpc.setActivity({
+        details,
+        state,
+        startTimestamp: gameStartTime,
+        largeImageKey: 'trailmakers-logo',
+        largeImageText: 'Old Trails',
+        instance: false,
+    }).catch(console.error);
+}
 
 const TRAILMAKERS_APP_ID = '585420';
 const TRAILMAKERS_DEPOT_ID = '585421';
@@ -46,7 +69,55 @@ const trailmakersVersions = [
     { name: "Alpha Demo", manifestId: "1105845463103535907" },
 ];
 
+// --- HELPER FUNCTIONS ---
 const getSafeFolderName = (versionName) => `Trailmakers ${versionName.replace(/['":]/g, '')}`;
+
+const copyDirRecursive = (src, dest) => {
+    if (!fs.existsSync(src)) return;
+    fs.mkdirSync(dest, { recursive: true });
+    for (const file of fs.readdirSync(src)) {
+        const srcFile = path.join(src, file);
+        const destFile = path.join(dest, file);
+        const stat = fs.lstatSync(srcFile);
+        if (stat.isDirectory()) {
+            copyDirRecursive(srcFile, destFile);
+        } else {
+            fs.copyFileSync(srcFile, destFile);
+        }
+    }
+};
+
+const mergeDirRecursive = (src, dest) => {
+    if (!fs.existsSync(src)) return;
+    if (!fs.existsSync(dest)) {
+        fs.mkdirSync(dest, { recursive: true });
+    }
+    for (const file of fs.readdirSync(src)) {
+        const srcFile = path.join(src, file);
+        const destFile = path.join(dest, file);
+        const stat = fs.lstatSync(srcFile);
+        if (stat.isDirectory()) {
+            mergeDirRecursive(srcFile, destFile);
+        } else {
+            if (!fs.existsSync(destFile)) {
+               fs.copyFileSync(srcFile, destFile);
+            }
+        }
+    }
+};
+
+const clearDir = (dirPath, exceptions = []) => {
+    if (!fs.existsSync(dirPath)) return;
+    for (const file of fs.readdirSync(dirPath)) {
+        if (exceptions.includes(file)) continue;
+        const fullPath = path.join(dirPath, file);
+        try {
+            fs.rmSync(fullPath, { recursive: true, force: true });
+        } catch (error) {
+            console.error(`Failed to delete ${fullPath}:`, error);
+        }
+    }
+};
 
 function findFileRecursive(startPath, filter) {
     let results = [];
@@ -67,6 +138,137 @@ function findFileRecursive(startPath, filter) {
     return results;
 }
 
+// --- SAVE MANAGEMENT LOGIC ---
+const LOCAL_LOW_PATH = path.join(app.getPath('appData'), '..', 'LocalLow', 'Flashbulb', 'Trailmakers');
+const DOCUMENTS_PATH = path.join(app.getPath('documents'), 'TrailMakers');
+const OLD_TRAILS_ROOT_PATH = path.join(app.getPath('documents'), 'OldTrails');
+const MAIN_BACKUP_PATH = path.join(OLD_TRAILS_ROOT_PATH, '_MainBackup');
+
+const backupMainSave = () => {
+    if (!isWindows) return;
+    console.log('Backing up main Trailmakers save data...');
+    try {
+        if (fs.existsSync(MAIN_BACKUP_PATH)) {
+            fs.rmSync(MAIN_BACKUP_PATH, { recursive: true, force: true });
+        }
+        fs.mkdirSync(path.join(MAIN_BACKUP_PATH, 'LocalLow'), { recursive: true });
+        fs.mkdirSync(path.join(MAIN_BACKUP_PATH, 'Documents'), { recursive: true });
+
+        if (fs.existsSync(LOCAL_LOW_PATH)) copyDirRecursive(LOCAL_LOW_PATH, path.join(MAIN_BACKUP_PATH, 'LocalLow'));
+        if (fs.existsSync(DOCUMENTS_PATH)) copyDirRecursive(DOCUMENTS_PATH, path.join(MAIN_BACKUP_PATH, 'Documents'));
+        console.log('Main save backup complete.');
+    } catch (error) {
+        console.error('Failed to create main save backup:', error);
+        dialog.showErrorBox('Backup Error', `Could not create a backup of your main save files. Check permissions.\nError: ${error.message}`);
+    }
+};
+
+const restoreMainSave = () => {
+    if (!isWindows || !fs.existsSync(MAIN_BACKUP_PATH)) return;
+    console.log('Restoring main Trailmakers save data...');
+    try {
+        clearDir(LOCAL_LOW_PATH);
+        clearDir(DOCUMENTS_PATH, ['OldTrails']);
+
+        copyDirRecursive(path.join(MAIN_BACKUP_PATH, 'LocalLow'), LOCAL_LOW_PATH);
+        copyDirRecursive(path.join(MAIN_BACKUP_PATH, 'Documents'), DOCUMENTS_PATH);
+        console.log('Main save restoration complete.');
+    } catch (error) {
+        console.error('Failed to restore main save backup:', error);
+    }
+};
+
+const prepareVersionSave = (versionName, downloadPath) => {
+    if (!isWindows) return;
+    
+    const safeVersionName = getSafeFolderName(versionName);
+    const versionSavePath = path.join(downloadPath, safeVersionName, '_SaveData');
+    const masterBackupBlueprintsPath = path.join(MAIN_BACKUP_PATH, 'Documents', 'Blueprints');
+    const liveBlueprintsPath = path.join(DOCUMENTS_PATH, 'Blueprints');
+
+    console.log(`Preparing save environment for ${versionName}...`);
+    clearDir(LOCAL_LOW_PATH);
+    clearDir(DOCUMENTS_PATH, ['OldTrails', 'Blueprints']);
+
+    console.log('Syncing master blueprint collection to live directory...');
+    mergeDirRecursive(masterBackupBlueprintsPath, liveBlueprintsPath);
+
+    const versionSaveDocumentsPath = path.join(versionSavePath, 'Documents');
+    const versionSaveLocalLowPath = path.join(versionSavePath, 'LocalLow');
+
+    if (fs.existsSync(versionSavePath)) {
+        console.log(`Restoring save data for ${versionName}.`);
+        copyDirRecursive(versionSaveLocalLowPath, LOCAL_LOW_PATH);
+
+        if (fs.existsSync(versionSaveDocumentsPath)) {
+             for (const file of fs.readdirSync(versionSaveDocumentsPath)) {
+                if (file === 'Blueprints') continue;
+                const srcFile = path.join(versionSaveDocumentsPath, file);
+                const destFile = path.join(DOCUMENTS_PATH, file);
+                const stat = fs.lstatSync(srcFile);
+                if (stat.isDirectory()) {
+                    copyDirRecursive(srcFile, destFile);
+                } else {
+                    fs.copyFileSync(srcFile, destFile);
+                }
+            }
+        }
+        
+        const versionBlueprintsPath = path.join(versionSaveDocumentsPath, 'Blueprints');
+        if (fs.existsSync(versionBlueprintsPath)) {
+            console.log(`Merging version-specific blueprints for ${versionName}.`);
+            mergeDirRecursive(versionBlueprintsPath, liveBlueprintsPath);
+        }
+    } else {
+        console.log(`No save data found for ${versionName}. Using master blueprints.`);
+    }
+};
+
+const saveVersionSession = (versionName, downloadPath) => {
+    if (!isWindows) return;
+
+    const safeVersionName = getSafeFolderName(versionName);
+    const versionSavePath = path.join(downloadPath, safeVersionName, '_SaveData');
+    const liveBlueprintsPath = path.join(DOCUMENTS_PATH, 'Blueprints');
+    const masterBackupBlueprintsPath = path.join(MAIN_BACKUP_PATH, 'Documents', 'Blueprints');
+    
+    console.log(`Saving session data for: ${versionName}`);
+    try {
+        if (fs.existsSync(versionSavePath)) {
+           fs.rmSync(versionSavePath, { recursive: true, force: true });
+        }
+        fs.mkdirSync(path.join(versionSavePath, 'LocalLow'), { recursive: true });
+        fs.mkdirSync(path.join(versionSavePath, 'Documents'), { recursive: true });
+
+        copyDirRecursive(LOCAL_LOW_PATH, path.join(versionSavePath, 'LocalLow'));
+        
+        for(const file of fs.readdirSync(DOCUMENTS_PATH)) {
+            if(file === 'Blueprints' || file === 'OldTrails') continue;
+            const src = path.join(DOCUMENTS_PATH, file);
+            const dest = path.join(versionSavePath, 'Documents', file);
+            if(fs.lstatSync(src).isDirectory()) {
+                copyDirRecursive(src, dest);
+            } else {
+                fs.copyFileSync(src, dest);
+            }
+        }
+
+        console.log('Merging session blueprints into main backup...');
+        if (fs.existsSync(liveBlueprintsPath)) {
+            mergeDirRecursive(liveBlueprintsPath, masterBackupBlueprintsPath);
+        }
+        
+        console.log('Saving updated blueprint collection to version save...');
+        copyDirRecursive(masterBackupBlueprintsPath, path.join(versionSavePath, 'Documents', 'Blueprints'));
+
+        console.log(`Session for ${versionName} saved successfully.`);
+    } catch (error) {
+        console.error(`Failed to save session for ${versionName}:`, error);
+        dialog.showErrorBox('Save Error', `Could not save session data for ${versionName}.\nError: ${error.message}`);
+    }
+};
+
+// --- WINDOW MANAGEMENT & APP LIFECYCLE ---
 function createWindow() {
     mainWindow = new BrowserWindow({
         width: 850,
@@ -83,19 +285,40 @@ function createWindow() {
     mainWindow.loadFile(path.join(__dirname, 'src', 'index.html'));
 }
 
-app.whenReady().then(createWindow);
+app.whenReady().then(() => {
+    createWindow();
+    backupMainSave();
+});
+
 app.on('window-all-closed', () => {
     if (downloadProcess) downloadProcess.kill();
     if (process.platform !== 'darwin') app.quit();
 });
 
+app.on('will-quit', () => {
+    rpc.destroy();
+});
+
+// --- IPC HANDLERS ---
 ipcMain.on('minimize-window', () => mainWindow.minimize());
 ipcMain.on('maximize-window', () => mainWindow.isMaximized() ? mainWindow.unmaximize() : mainWindow.maximize());
-ipcMain.on('close-window', () => mainWindow.close());
+ipcMain.on('close-window', () => {
+    if (activeGameProcess) {
+        dialog.showMessageBox(mainWindow, {
+            type: 'warning',
+            title: 'Game Still Running',
+            message: 'A version of Trailmakers is still running. Please close it before closing the launcher.',
+            buttons: ['OK']
+        });
+        return;
+    }
+    restoreMainSave();
+    mainWindow.close();
+});
 
 ipcMain.handle('get-credentials', async () => {
     const username = store.get('username', '');
-    const defaultPath = path.join(app.getPath('documents'), 'Trailmakers Versions');
+    const defaultPath = path.join(OLD_TRAILS_ROOT_PATH, 'Versions');
     const downloadPath = store.get('downloadPath', defaultPath);
     
     if (!fs.existsSync(downloadPath)) {
@@ -113,6 +336,7 @@ ipcMain.on('ui-ready', (event) => {
     event.reply('debug-mode-status', DEBUG_MODE);
     event.reply('platform-info', process.platform); 
 });
+
 ipcMain.handle('get-app-version', () => app.getVersion());
 
 ipcMain.handle('select-folder', async () => {
@@ -142,88 +366,6 @@ ipcMain.handle('get-installed-versions', (event, downloadPath) => {
     return installed;
 });
 
-const getFlashbulbTrailmakersPath = () => {
-    const appDataPath = app.getPath('appData');
-    const localLowPath = path.join(appDataPath, '..', 'LocalLow');
-    return path.join(localLowPath, 'Flashbulb', 'Trailmakers');
-};
-
-const getAppDataBackupPath = () => {
-    const flashbulbTrailmakersPath = getFlashbulbTrailmakersPath();
-    return path.join(flashbulbTrailmakersPath, '_backup');
-};
-
-const backupFlashbulbTrailmakers = () => {
-    if (!isWindows) return true; 
-    const sourcePath = getFlashbulbTrailmakersPath();
-    const backupPath = getAppDataBackupPath();
-
-    if (fs.existsSync(sourcePath) && fs.readdirSync(sourcePath).filter(name => name !== '_backup').length > 0) {
-        try {
-            fs.mkdirSync(backupPath, { recursive: true });
-            fs.readdirSync(sourcePath).forEach(item => {
-                const itemPath = path.join(sourcePath, item);
-                const backupItemPath = path.join(backupPath, item);
-                if (item === '_backup') return;
-                if (fs.existsSync(backupItemPath)) fs.rmSync(backupItemPath, { recursive: true, force: true });
-                fs.renameSync(itemPath, backupItemPath);
-            });
-            return true;
-        } catch (error) {
-            dialog.showErrorBox('Backup Error', `Could not backup Trailmakers profile data.\nError: ${error.message}`);
-            return false;
-        }
-    }
-    return true;
-};
-
-const restoreFlashbulbTrailmakers = () => {
-    if (!isWindows) return true;
-    const targetPath = getFlashbulbTrailmakersPath();
-    const backupPath = getAppDataBackupPath();
-
-    if (fs.existsSync(backupPath) && fs.readdirSync(backupPath).length > 0) {
-        try {
-            fs.mkdirSync(targetPath, { recursive: true });
-            fs.readdirSync(targetPath).forEach(item => {
-                const itemPath = path.join(targetPath, item);
-                if (item !== '_backup') fs.rmSync(itemPath, { recursive: true, force: true });
-            });
-            fs.readdirSync(backupPath).forEach(item => {
-                const itemPath = path.join(backupPath, item);
-                const targetItemPath = path.join(targetPath, item);
-                fs.renameSync(itemPath, targetItemPath);
-            });
-            if (fs.readdirSync(backupPath).length === 0) fs.rmSync(backupPath, { recursive: true, force: true });
-            return true;
-        } catch (error) {
-            dialog.showErrorBox('Restore Error', `Could not restore Trailmakers profile data.\nError: ${error.message}`);
-            return false;
-        }
-    }
-    return true;
-};
-
-const renameTransformationSlotsFolder = async (originalName, newName) => {
-    if (!isWindows) return true; 
-    const documentsPath = app.getPath('documents');
-    const trailmakersDocsPath = path.join(documentsPath, 'Trailmakers');
-    const oldPath = path.join(trailmakersDocsPath, originalName);
-    const newPath = path.join(trailmakersDocsPath, newName);
-
-    if (fs.existsSync(oldPath)) {
-        try {
-            if (fs.existsSync(newPath)) fs.rmSync(newPath, { recursive: true, force: true });
-            fs.renameSync(oldPath, newPath);
-            return true;
-        } catch (error) {
-            dialog.showErrorBox('Folder Rename Error', `Could not rename folder.\nError: ${error.message}`);
-            return false;
-        }
-    }
-    return false;
-};
-
 ipcMain.on('launch-game', async (event, { downloadPath, versionName }) => {
     const folderName = getSafeFolderName(versionName);
     const versionPath = path.join(downloadPath, folderName);
@@ -231,45 +373,84 @@ ipcMain.on('launch-game', async (event, { downloadPath, versionName }) => {
     if (!fs.existsSync(versionPath)) {
         return dialog.showErrorBox('Launch Error', `Could not find game directory:\n${versionPath}`);
     }
+    
+    prepareVersionSave(versionName, downloadPath);
+
+    const exePath = isWindows ? path.join(versionPath, 'Trailmakers.exe') : versionPath;
+    
+    if (isWindows && !fs.existsSync(exePath)) {
+        return dialog.showErrorBox('Launch Error', `Could not find Trailmakers.exe:\n${exePath}`);
+    }
 
     try {
-        const steamSettingsPath = path.join(versionPath, 'steam_settings');
-        const dlcFilePath = path.join(steamSettingsPath, 'DLC.txt');
-        fs.mkdirSync(steamSettingsPath, { recursive: true });
-        fs.writeFileSync(dlcFilePath, '');
-    } catch (error) {
-        return dialog.showErrorBox('Launch Error', `Could not prepare the DLC configuration file.\nError: ${error.message}`);
-    }
-    
-    backupFlashbulbTrailmakers();
-    await renameTransformationSlotsFolder('Transformation slots', '_Transformation slots');
+        activeGameProcess = spawn(exePath, [], { detached: true, stdio: 'ignore' });
+        activeGameVersionName = versionName;
+        gameStartTime = new Date();
+        setActivity('Playing Trailmakers', `Version: ${versionName}`);
+        mainWindow.webContents.send('game-launched', versionName);
+        
+        activeGameProcess.on('close', (code) => {
+            console.log(`Trailmakers process for ${versionName} exited with code ${code}`);
+            saveVersionSession(versionName, downloadPath);
+            console.log('Game closed. Restoring main save data immediately.');
+            restoreMainSave();
+            gameStartTime = null;
+            setActivity('Browsing old versions', 'In the launcher');
+            mainWindow.webContents.send('status-update', `${versionName} session saved. Main save restored.`);
 
-    if (isWindows) {
-        const exePath = path.join(versionPath, 'Trailmakers.exe');
-        if (fs.existsSync(exePath)) {
-            shell.openPath(exePath).catch(err => dialog.showErrorBox('Launch Error', `Could not start Trailmakers.exe.\nError: ${err.message}`));
-        } else {
-            dialog.showErrorBox('Launch Error', `Could not find Trailmakers.exe:\n${exePath}`);
-        }
-    } else {
-        shell.openPath(versionPath).catch(err => dialog.showErrorBox('Launch Error', `Could not open folder:\n${err.message}`));
+            activeGameProcess = null;
+            activeGameVersionName = null;
+            mainWindow.webContents.send('game-closed');
+        });
+
+        activeGameProcess.on('error', (err) => {
+            dialog.showErrorBox('Launch Error', `Failed to start Trailmakers.\nError: ${err.message}`);
+            activeGameProcess = null;
+            activeGameVersionName = null;
+            gameStartTime = null;
+            setActivity('Browsing old versions', 'In the launcher');
+            mainWindow.webContents.send('game-closed');
+        });
+
+    } catch(err) {
+        dialog.showErrorBox('Launch Error', `Could not start Trailmakers.\nError: ${err.message}`);
     }
 });
 
 ipcMain.handle('uninstall-version', async (event, { downloadPath, versionName }) => {
+    if (activeGameVersionName === versionName) {
+        dialog.showMessageBox(mainWindow, {
+            type: 'error',
+            title: 'Cannot Uninstall',
+            message: 'This version of Trailmakers is currently running.',
+            detail: 'Please close the game before trying to uninstall it.'
+        });
+        return { success: false, message: 'Uninstall failed: game is running.' };
+    }
+
     const folderName = getSafeFolderName(versionName);
     const fullPath = path.join(downloadPath, folderName);
     const result = await dialog.showMessageBox(mainWindow, {
-        type: 'warning', buttons: ['Cancel', 'Uninstall'], defaultId: 0,
+        type: 'warning', buttons: ['Cancel', 'Uninstall'], defaultId: 0, cancelId: 0,
         title: 'Confirm Uninstall', message: `Are you sure you want to permanently delete ${versionName}?`,
-        detail: `This will delete the folder and all its contents at:\n${fullPath}`
+        detail: `This will delete the folder and all its contents:\n${fullPath}`
     });
     if (result.response === 1) {
         try {
-            restoreFlashbulbTrailmakers();
-            await renameTransformationSlotsFolder('_Transformation slots', 'Transformation slots');
             if (fs.existsSync(fullPath)) {
                 fs.rmSync(fullPath, { recursive: true, force: true });
+                
+                const remainingVersions = fs.readdirSync(downloadPath).filter(file => {
+                    const stat = fs.lstatSync(path.join(downloadPath, file));
+                    return stat.isDirectory() && !file.startsWith('_temp_');
+                });
+
+                if (remainingVersions.length === 0) {
+                    console.log('Last version uninstalled. Restoring main save data.');
+                    restoreMainSave();
+                    return { success: true, message: 'Last version uninstalled. Main save restored.' };
+                }
+
                 return { success: true, message: `${versionName} has been uninstalled.` };
             }
             return { success: false, message: 'Folder not found.' };
@@ -281,34 +462,57 @@ ipcMain.handle('uninstall-version', async (event, { downloadPath, versionName })
     return { success: false, message: 'Uninstall cancelled by user.' };
 });
 
-ipcMain.handle('check-and-download-steamcmd', async () => {
-    const depotDownloaderExePath = path.join(resourcesPath, depotDownloaderExecutable);
-    const crackedApiLibPath = path.join(resourcesPath, steamApiLib);
-
-    if (!fs.existsSync(depotDownloaderExePath)) {
-        dialog.showErrorBox('Missing Component', `${depotDownloaderExecutable} was not found.\nExpected at: ${depotDownloaderExePath}`);
-        return false;
-    }
-    if (!fs.existsSync(crackedApiLibPath)) {
-        dialog.showErrorBox('Missing Component', `${steamApiLib} was not found.\nExpected at: ${crackedApiLibPath}`);
-        return false;
+ipcMain.handle('factory-reset', async () => {
+    if (activeGameProcess) {
+        dialog.showMessageBox(mainWindow, {
+            type: 'error',
+            title: 'Cannot Reset',
+            message: 'A version of Trailmakers is currently running.',
+            detail: 'Please close the game before starting a factory reset.'
+        });
+        return { success: false, message: 'Reset failed: game is running.' };
     }
 
-    return true;
+    const result = await dialog.showMessageBox(mainWindow, {
+        type: 'warning',
+        buttons: ['Cancel', 'Yes, Delete Everything'],
+        defaultId: 0,
+        cancelId: 0,
+        title: 'Confirm Factory Reset',
+        message: 'Are you absolutely sure?',
+        detail: 'This will permanently delete all downloaded versions and their save data. Your main game save will be restored from the initial backup. This action cannot be undone.'
+    });
+
+    if (result.response === 1) {
+        try {
+            const defaultPath = path.join(OLD_TRAILS_ROOT_PATH, 'Versions');
+            const downloadPath = store.get('downloadPath', defaultPath);
+
+            console.log(`Performing factory reset. Deleting: ${downloadPath}`);
+            if (fs.existsSync(downloadPath)) {
+                fs.rmSync(downloadPath, { recursive: true, force: true });
+            }
+            fs.mkdirSync(downloadPath, { recursive: true });
+            restoreMainSave();
+            return { success: true, message: 'Factory reset complete. All versions removed.' };
+        } catch (error) {
+            console.error('Factory reset failed:', error);
+            dialog.showErrorBox('Reset Error', `An error occurred during the factory reset.\nError: ${error.message}`);
+            return { success: false, message: 'An error occurred during the reset.' };
+        }
+    }
+    return { success: false, message: 'Factory reset cancelled.' };
 });
 
 ipcMain.on('start-download', async (event, { username, password, version, downloadPath }) => {
     if (downloadProcess) {
         return event.reply('status-update', 'A download is already in progress.');
     }
+    setActivity('Downloading', version.name);
     store.set('username', username);
     await keytar.setPassword(KEYTAR_SERVICE, username, password);
     const sendStatus = (message) => event.reply('status-update', message);
     const depotDownloaderExePath = path.join(resourcesPath, depotDownloaderExecutable);
-    if (!fs.existsSync(depotDownloaderExePath)) {
-        sendStatus(`Error: ${depotDownloaderExecutable} not found!`);
-        return event.reply('download-complete', { success: false });
-    }
     const tempDownloadDir = path.join(downloadPath, `_temp_${version.manifestId}`);
     if (fs.existsSync(tempDownloadDir)) fs.rmSync(tempDownloadDir, { recursive: true, force: true });
     fs.mkdirSync(tempDownloadDir, { recursive: true });
@@ -322,14 +526,18 @@ ipcMain.on('start-download', async (event, { username, password, version, downlo
     let stderrOutput = ''; 
     const handleOutput = (data) => {
         const output = data.toString();
-        if (DEBUG_MODE) event.reply('debug-log-update', output);
-        if (output.includes('Enter 2FA code:') || output.includes('STEAM GUARD! Use the Steam Mobile App')) {
+        
+        if (output.includes('Use the Steam Mobile App to confirm your sign in...')) {
+            sendStatus('Mobile confirmation required...');
+            event.reply('steam-mobile-required');
+        } else if (output.includes('Enter 2FA code:') || output.includes('Please enter your 2-factor auth code')) {
             sendStatus('Authentication required...');
             event.reply('steam-guard-required');
         } else if (output.includes('Logging')) sendStatus('Logging in to Steam...');
         else if (output.includes('Processing depot')) sendStatus('Processing depot information...');
         else if (output.includes('Downloading depot')) sendStatus('Starting file download...');
         else if (output.includes('Depot download complete')) sendStatus('Download complete, finalizing files...');
+        
         const progressMatch = output.match(/(\d+\.\d+)%/);
         if (progressMatch && progressMatch[1]) {
             const progress = parseFloat(progressMatch[1]);
@@ -343,38 +551,39 @@ ipcMain.on('start-download', async (event, { username, password, version, downlo
         handleOutput(data);
     });
     downloadProcess.on('close', (code) => {
-        if (code === 0) {
-            try {
-                const downloadedContentPath = tempDownloadDir;
-                const finalVersionPath = path.join(downloadPath, getSafeFolderName(version.name));
-                if (!fs.existsSync(path.join(downloadedContentPath, 'Trailmakers.exe'))) {
-                     throw new Error(`Download finished, but Trailmakers.exe was not found.`);
-                }
-                fs.renameSync(downloadedContentPath, finalVersionPath);
-                const crackedApiLibPath = path.join(resourcesPath, steamApiLib);
-                if (fs.existsSync(crackedApiLibPath)) {
+        setActivity('Browsing old versions', 'In the launcher');
+        setTimeout(() => {
+            if (code === 0) {
+                try {
+                    const downloadedContentPath = tempDownloadDir;
+                    const finalVersionPath = path.join(downloadPath, getSafeFolderName(version.name));
+                    if (!fs.existsSync(path.join(downloadedContentPath, 'Trailmakers.exe'))) {
+                         throw new Error(`Download finished, but Trailmakers.exe was not found.`);
+                    }
+                    fs.renameSync(downloadedContentPath, finalVersionPath);
+                    const crackedApiLibPath = path.join(resourcesPath, 'steam_api64.dll');
                     sendStatus('Applying patch...');
-                    const originalLibName = isWindows ? 'steam_api64.dll' : 'libsteam_api.so';
+                    const originalLibName = 'steam_api64.dll';
                     const results = findFileRecursive(finalVersionPath, originalLibName);
                     if (results && results.length > 0) {
                         fs.copyFileSync(crackedApiLibPath, results[0]);
                     } else {
-                        fs.copyFileSync(crackedApiLibPath, path.join(finalVersionPath, steamApiLib));
+                        fs.copyFileSync(crackedApiLibPath, path.join(finalVersionPath, originalLibName));
                     }
+                    sendStatus('Installation Complete!');
+                    event.reply('download-complete', { success: true, installedManifestId: version.manifestId });
+                } catch (moveError) {
+                    console.error("File move/patch error:", moveError);
+                    sendStatus(`Error finalizing installation: ${moveError.message}`);
+                    event.reply('download-complete', { success: false });
                 }
-                sendStatus('Installation Complete!');
-                event.reply('download-complete', { success: true, installedManifestId: version.manifestId });
-            } catch (moveError) {
-                console.error("File move/patch error:", moveError);
-                sendStatus(`Error finalizing installation: ${moveError.message}`);
+            } else {
+                const finalError = stderrOutput.trim() || `Process exited with code ${code}.`;
+                sendStatus(`Download failed: ${finalError}`);
                 event.reply('download-complete', { success: false });
             }
-        } else {
-            const finalError = stderrOutput.trim() || `Process exited with code ${code}.`;
-            sendStatus(`Download failed: ${finalError}`);
-            event.reply('download-complete', { success: false });
-        }
-        downloadProcess = null;
+            downloadProcess = null;
+        }, 500);
     });
 });
 
@@ -383,3 +592,15 @@ ipcMain.on('submit-steam-guard', (event, code) => {
         downloadProcess.stdin.write(`${code}\n`);
     }
 });
+
+rpc.on('ready', () => {
+    console.log('Discord RPC is ready.');
+    rpcReady = true;
+    setActivity('Browsing old versions', 'In the launcher');
+});
+
+if (DISCORD_CLIENT_ID !== 'YOUR_CLIENT_ID_HERE') {
+    rpc.login({ clientId: DISCORD_CLIENT_ID }).catch(err => {
+        console.error('Failed to connect to Discord RPC:', err);
+    });
+}

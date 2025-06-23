@@ -15,11 +15,13 @@ const TitleBar = ({ appVersion }) => (
     </div>
 );
 
-const VersionCard = ({ version, isInstalled, isDownloading, isProcessing, platform, onDownload, onPlay, onUninstall }) => {
+const VersionCard = ({ version, isInstalled, isDownloading, isProcessing, runningGame, onDownload, onPlay, onUninstall }) => {
     const match = version.name.match(/^([\d\.]+) (.*)/);
     const versionNumber = match ? match[1] : '';
     const updateName = match ? match[2] : version.name;
-    const isWindows = platform === 'win32';
+
+    const isThisGameRunning = runningGame === version.name;
+    const isAnyGameRunning = runningGame !== null;
 
     return (
         <div className={`bg-gray-800 p-4 rounded-lg flex items-center justify-between transition-all duration-300 ${isDownloading ? 'ring-2 ring-cyan-500' : 'ring-1 ring-gray-700'}`}>
@@ -30,15 +32,25 @@ const VersionCard = ({ version, isInstalled, isDownloading, isProcessing, platfo
             <div className="flex items-center gap-3 flex-shrink-0">
                 {isInstalled ? (
                     <>
-                        <button onClick={onPlay} className="bg-green-600 hover:bg-green-700 text-white font-bold py-2 px-4 rounded-md text-sm transition-colors">
-                            {isWindows ? 'Play' : 'Show in Folder'}
+                        <button 
+                            onClick={onPlay} 
+                            disabled={isAnyGameRunning || isProcessing}
+                            className={`font-bold py-2 px-4 rounded-md text-sm transition-colors text-white ${isThisGameRunning ? 'bg-yellow-500 cursor-not-allowed' : 'bg-green-600 hover:bg-green-700'} disabled:bg-gray-600 disabled:cursor-not-allowed`}
+                        >
+                            {isThisGameRunning ? 'Running...' : 'Play'}
                         </button>
-                        <button onClick={onUninstall} className="bg-red-600 hover:bg-red-700 text-white font-bold py-2 px-4 rounded-md text-sm transition-colors">Uninstall</button>
+                        <button 
+                            onClick={onUninstall} 
+                            disabled={isAnyGameRunning || isProcessing}
+                            className="bg-red-600 hover:bg-red-700 text-white font-bold py-2 px-4 rounded-md text-sm transition-colors disabled:bg-gray-600 disabled:cursor-not-allowed"
+                        >
+                            Uninstall
+                        </button>
                     </>
                 ) : (
                     <button
                         onClick={onDownload}
-                        disabled={isProcessing}
+                        disabled={isProcessing || isAnyGameRunning}
                         className="bg-cyan-600 hover:bg-cyan-700 disabled:bg-gray-600 disabled:cursor-not-allowed text-white font-bold py-2 px-4 rounded-md text-sm transition-colors"
                     >
                         {isDownloading ? 'Installing...' : 'Install'}
@@ -49,7 +61,7 @@ const VersionCard = ({ version, isInstalled, isDownloading, isProcessing, platfo
     );
 };
 
-const AuthPrompt = ({ onCodeSubmit }) => {
+const AuthPrompt = ({ onCodeSubmit, type }) => {
     const [steamGuardCode, setSteamGuardCode] = useState('');
     const handleSubmit = (e) => {
         e.preventDefault();
@@ -57,11 +69,23 @@ const AuthPrompt = ({ onCodeSubmit }) => {
         onCodeSubmit(steamGuardCode);
         setSteamGuardCode('');
     };
+
+    if (type === 'mobile') {
+        return (
+            <div className="p-4 bg-gray-700/50 rounded-lg space-y-3 border border-yellow-500/30">
+                <div className="text-center">
+                    <p className="font-semibold text-yellow-300">Authentication Required</p>
+                    <p className="text-sm text-gray-300">Please approve the sign in request on your Steam Mobile App.</p>
+                </div>
+            </div>
+        );
+    }
+    
     return (
         <div className="p-4 bg-gray-700/50 rounded-lg space-y-3 border border-yellow-500/30">
             <div className="text-center">
                 <p className="font-semibold text-yellow-300">Authentication Required</p>
-                <p className="text-sm text-gray-300">Approve on your mobile app, or enter the code below.</p>
+                <p className="text-sm text-gray-300">Please enter the code from your authenticator app.</p>
             </div>
             <form onSubmit={handleSubmit} className="flex gap-2 items-center">
                 <input type="text" placeholder="Enter code here" value={steamGuardCode} onChange={(e) => setSteamGuardCode(e.target.value)} className="flex-grow min-w-0 bg-gray-800 border border-gray-600 rounded-md p-2 text-sm focus:ring-2 focus:ring-yellow-500 focus:outline-none" autoFocus />
@@ -83,8 +107,8 @@ function App() {
     const [currentDownload, setCurrentDownload] = useState(null);
     const [downloadProgress, setDownloadProgress] = useState(0);
     const [statusMessage, setStatusMessage] = useState('Welcome! Please enter your details.');
-    const [needsAuthCode, setNeedsAuthCode] = useState(false);
-    const [platform, setPlatform] = useState('');
+    const [authPromptType, setAuthPromptType] = useState(null); // Can be 'code' or 'mobile'
+    const [runningGame, setRunningGame] = useState(null);
 
     const downloadPathRef = useRef(downloadPath);
     useEffect(() => {
@@ -107,49 +131,50 @@ function App() {
             setDownloadPath(creds.downloadPath || '');
             const version = await window.electronAPI.getAppVersion();
             setAppVersion(version);
-            setStatusMessage('Verifying downloader...');
-            const downloaderReady = await window.electronAPI.checkAndDownloadSteamCmd();
-            setStatusMessage(downloaderReady ? 'Ready. Select a version to install.' : 'Required files not found. Please check setup.');
+            setStatusMessage('Ready. Select a version to install.');
             if (creds.downloadPath) {
-                const installed = await window.electronAPI.getInstalledVersions(creds.downloadPath);
-                setInstalledVersions(installed);
+                fetchInstalledVersions();
             }
         };
 
         setup();
 
         window.electronAPI.onVersionsLoaded(setVersions);
-        window.electronAPI.onPlatformInfo(setPlatform);
         window.electronAPI.uiReady();
 
         const handleStatusUpdate = (message) => {
             setStatusMessage(message);
-            if (!message.toLowerCase().includes('steam guard') && !message.toLowerCase().includes('approve login')) {
-                setNeedsAuthCode(false);
+            // If we get a new status that isn't an auth request, hide the prompt.
+            const lowerCaseMessage = message.toLowerCase();
+            if (!lowerCaseMessage.includes('authentication required') && !lowerCaseMessage.includes('confirmation required')) {
+                setAuthPromptType(null);
             }
         };
+
         const handleDownloadComplete = ({ success }) => {
-            if (success) {
-                fetchInstalledVersions();
-            }
+            if (success) fetchInstalledVersions();
             setIsProcessing(false);
             setCurrentDownload(null);
+            setAuthPromptType(null);
             setStatusMessage(success ? 'Installation Complete!' : 'Download failed or was cancelled.');
             setTimeout(() => setStatusMessage('Ready. Select a version to install.'), 5000);
         };
+
+        const handleGameLaunched = (versionName) => setRunningGame(versionName);
+        const handleGameClosed = () => setRunningGame(null);
         
-        const removeStatusListener = window.electronAPI.onStatusUpdate(handleStatusUpdate);
-        const removeProgressListener = window.electronAPI.onDownloadProgress(({ progress }) => setDownloadProgress(progress));
-        const removeGuardListener = window.electronAPI.onSteamGuardRequired(() => setNeedsAuthCode(true));
-        const removeDownloadCompleteListener = window.electronAPI.onDownloadComplete(handleDownloadComplete);
+        window.electronAPI.onStatusUpdate(handleStatusUpdate);
+        window.electronAPI.onDownloadProgress(({ progress }) => setDownloadProgress(progress));
+        window.electronAPI.onSteamGuardRequired(() => setAuthPromptType('code'));
+        window.electronAPI.onSteamMobileRequired(() => setAuthPromptType('mobile'));
+        window.electronAPI.onDownloadComplete(handleDownloadComplete);
+        window.electronAPI.onGameLaunched(handleGameLaunched);
+        window.electronAPI.onGameClosed(handleGameClosed);
 
         return () => {
-            window.electronAPI.removeAllListeners('versions-loaded');
-            window.electronAPI.removeAllListeners('platform-info');
-            removeStatusListener();
-            removeProgressListener();
-            removeGuardListener();
-            removeDownloadCompleteListener();
+            ['versions-loaded', 'status-update', 'download-progress', 'steam-guard-required', 'steam-mobile-required', 'download-complete', 'game-launched', 'game-closed'].forEach(channel => 
+                window.electronAPI.removeAllListeners(channel)
+            );
         };
     }, []);
 
@@ -170,6 +195,7 @@ function App() {
         setIsProcessing(true);
         setCurrentDownload(version.manifestId);
         setDownloadProgress(0);
+        setAuthPromptType(null);
         window.electronAPI.startDownload({ username, password, version, downloadPath });
     };
 
@@ -187,7 +213,18 @@ function App() {
         }
     };
 
+    const handleFactoryReset = async () => {
+        setStatusMessage('Waiting for confirmation...');
+        const result = await window.electronAPI.factoryReset();
+        setStatusMessage(result.message);
+        if (result.success) {
+            fetchInstalledVersions();
+        }
+    };
+
     const handleCodeSubmit = (code) => {
+        setAuthPromptType(null);
+        setStatusMessage('Submitting code...');
         window.electronAPI.submitSteamGuard(code);
     };
 
@@ -201,15 +238,15 @@ function App() {
                     <div className="bg-gray-800 p-4 rounded-lg border border-gray-700/50">
                         <h2 className="text-lg font-bold text-white border-b border-gray-700 pb-2 mb-3">Settings</h2>
                         <div className="space-y-3">
-                            <input type="text" placeholder="Steam Username" value={username} onChange={(e) => setUsername(e.target.value)} disabled={isProcessing} className="w-full bg-gray-700 border border-gray-600 rounded-md p-2 text-sm focus:ring-2 focus:ring-cyan-500 focus:outline-none" />
-                            <input type="password" placeholder="Password" value={password} onChange={(e) => setPassword(e.target.value)} disabled={isProcessing} className="w-full bg-gray-700 border border-gray-600 rounded-md p-2 text-sm focus:ring-2 focus:ring-cyan-500 focus:outline-none" />
-                            <button onClick={handleSelectFolder} disabled={isProcessing} className="w-full text-left bg-gray-700 hover:bg-gray-600 border border-gray-600 rounded-md p-2 text-sm transition-colors truncate">
+                            <input type="text" placeholder="Steam Username" value={username} onChange={(e) => setUsername(e.target.value)} disabled={isProcessing || runningGame} className="w-full bg-gray-700 border border-gray-600 rounded-md p-2 text-sm focus:ring-2 focus:ring-cyan-500 focus:outline-none" />
+                            <input type="password" placeholder="Password" value={password} onChange={(e) => setPassword(e.target.value)} disabled={isProcessing || runningGame} className="w-full bg-gray-700 border border-gray-600 rounded-md p-2 text-sm focus:ring-2 focus:ring-cyan-500 focus:outline-none" />
+                            <button onClick={handleSelectFolder} disabled={isProcessing || runningGame} className="w-full text-left bg-gray-700 hover:bg-gray-600 border border-gray-600 rounded-md p-2 text-sm transition-colors truncate disabled:opacity-50 disabled:cursor-not-allowed">
                                 <span className="font-semibold">Path:</span> {downloadPath || 'Choose Folder...'}
                             </button>
                         </div>
                     </div>
                     
-                    {isProcessing && needsAuthCode && <AuthPrompt onCodeSubmit={handleCodeSubmit} />}
+                    {isProcessing && authPromptType && <AuthPrompt onCodeSubmit={handleCodeSubmit} type={authPromptType} />}
                     
                     <div className="flex-grow bg-gray-800 p-4 rounded-lg border border-gray-700/50 flex flex-col justify-center">
                         <h3 className="text-md font-bold text-white mb-2">Status</h3>
@@ -220,18 +257,23 @@ function App() {
                             </div>
                         )}
                     </div>
-                    
-                    <div className="bg-blue-900/30 text-blue-200 p-3 rounded-lg text-xs text-center border border-blue-800/50 mt-auto">
-                        <p>All game versions downloaded via this tool only support <strong>offline or LAN use only</strong>.</p>
-                    </div>
-                    <div className="bg-yellow-900/30 text-yellow-200 p-3 rounded-lg text-xs text-center border border-yellow-800/50">
-                        <p>This app is a community tool and is not affiliated with Flashbulb Games.</p>
-                    </div>
-
                 </div>
+
                 <div className="w-2/3 flex flex-col bg-gray-800 p-4 rounded-lg border border-gray-700/50">
                     <div className="flex justify-between items-center border-b border-gray-700 pb-2 mb-3">
-                        <h2 className="text-lg font-bold text-white">Available Versions</h2>
+                        <div className="flex items-center gap-3">
+                            <h2 className="text-lg font-bold text-white">Available Versions</h2>
+                            {installedVersions.length > 0 && (
+                                <button 
+                                    onClick={handleFactoryReset} 
+                                    disabled={isProcessing || runningGame}
+                                    className="p-1 rounded-full text-gray-400 hover:bg-red-800 hover:text-white disabled:text-gray-600 disabled:hover:bg-transparent disabled:cursor-not-allowed transition-colors"
+                                    title="Factory Reset All Versions"
+                                >
+                                    <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" viewBox="0 0 16 16"><path d="M8.982 1.566a1.13 1.13 0 0 0-1.96 0L.165 13.233c-.457.778.091 1.767.98 1.767h13.713c.889 0 1.438-.99.98-1.767L8.982 1.566zM8 5c.535 0 .954.462.9.995l-.35 3.507a.552.552 0 0 1-1.1 0L7.1 5.995A.905.905 0 0 1 8 5zm.002 6a1 1 0 1 1 0 2 1 1 0 0 1 0-2z"/></svg>
+                                </button>
+                            )}
+                        </div>
                         <input type="text" placeholder="Search..." value={searchTerm} onChange={(e) => setSearchTerm(e.target.value)} className="bg-gray-700 border border-gray-600 rounded-md px-2 py-1 text-sm focus:ring-1 focus:ring-cyan-500 focus:outline-none" />
                     </div>
                     <div className="flex-grow space-y-3 overflow-y-auto pr-2">
@@ -242,7 +284,7 @@ function App() {
                                 isInstalled={installedVersions.includes(v.manifestId)}
                                 isDownloading={isProcessing && currentDownload === v.manifestId}
                                 isProcessing={isProcessing}
-                                platform={platform}
+                                runningGame={runningGame}
                                 onDownload={() => handleDownload(v)}
                                 onPlay={() => handlePlay(v)}
                                 onUninstall={() => handleUninstall(v)}

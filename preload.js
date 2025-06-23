@@ -17,23 +17,19 @@ contextBridge.exposeInMainWorld('electronAPI', {
     getCredentials: () => ipcRenderer.invoke('get-credentials'),
     getInstalledVersions: (path) => ipcRenderer.invoke('get-installed-versions', path),
     uninstallVersion: (args) => ipcRenderer.invoke('uninstall-version', args),
-    checkAndDownloadSteamCmd: () => ipcRenderer.invoke('check-and-download-steamcmd'),
+    factoryReset: () => ipcRenderer.invoke('factory-reset'),
     getAppVersion: () => ipcRenderer.invoke('get-app-version'),
 
     // Listeners (main -> renderer)
     onStatusUpdate: (callback) => ipcRenderer.on('status-update', (_event, value) => callback(value)),
     onSteamGuardRequired: (callback) => ipcRenderer.on('steam-guard-required', () => callback()),
+    onSteamMobileRequired: (callback) => ipcRenderer.on('steam-mobile-required', () => callback()),
     onDownloadComplete: (callback) => ipcRenderer.on('download-complete', (_event, value) => callback(value)),
     onVersionsLoaded: (callback) => ipcRenderer.on('versions-loaded', (_event, value) => callback(value)),
     onDownloadProgress: (callback) => ipcRenderer.on('download-progress', (_event, value) => callback(value)),
+    onGameLaunched: (callback) => ipcRenderer.on('game-launched', (_event, value) => callback(value)),
+    onGameClosed: (callback) => ipcRenderer.on('game-closed', () => callback()),
     
-    onDebugModeStatus: (callback) => ipcRenderer.on('debug-mode-status', (_event, value) => callback(value)),
-    onDebugLogUpdate: (callback) => ipcRenderer.on('debug-log-update', (_event, value) => callback(value)),
-
-    // --- NEW: Listener for Platform Info ---
-    onPlatformInfo: (callback) => ipcRenderer.on('platform-info', (_event, value) => callback(value)),
-
-
     // Cleanup
     removeAllListeners: (channel) => ipcRenderer.removeAllListeners(channel)
 });
