@@ -45,7 +45,9 @@ async function setActivity(details, state) {
 const TRAILMAKERS_APP_ID = '585420';
 const TRAILMAKERS_DEPOT_ID = '585421';
 const trailmakersVersions = [
-    { name: "1.6 Wings and Weapons", manifestId: "5048626106885406615" },
+
+    { name: "1.7 Spacebound", manifestId: "4376696831141480241" },
+    { name: "1.6 Wings and Weapons", manifestId: "7868502592313023064" },
     { name: "1.5 Decals", manifestId: "6418274266282092041" },
     { name: "1.4.2 Mirror Mode", manifestId: "8084832536635904913" },
     { name: "1.3 Mod Makers", manifestId: "752294084919392246" },

@@ -186,7 +186,7 @@ function App() {
         const path = await window.electronAPI.selectFolder();
         if (path) {
             setDownloadPath(path);
-            fetchInstalledVersions(path); // ** FIXED: Pass new path directly **
+            fetchInstalledVersions(path);
         }
     };
 
