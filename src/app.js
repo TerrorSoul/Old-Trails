@@ -114,15 +114,9 @@ function App() {
     const [authPromptType, setAuthPromptType] = useState(null);
     const [runningGame, setRunningGame] = useState(null);
 
-    const downloadPathRef = useRef(downloadPath);
-    useEffect(() => {
-        downloadPathRef.current = downloadPath;
-    }, [downloadPath]);
-
-    const fetchInstalledVersions = async () => {
-        const currentPath = downloadPathRef.current;
-        if (currentPath) {
-            const installed = await window.electronAPI.getInstalledVersions(currentPath);
+    const fetchInstalledVersions = async (path) => {
+        if (path) {
+            const installed = await window.electronAPI.getInstalledVersions(path);
             setInstalledVersions(installed);
         }
     };
@@ -132,12 +126,16 @@ function App() {
             const creds = await window.electronAPI.getCredentials();
             setUsername(creds.username || '');
             setPassword(creds.password || '');
-            setDownloadPath(creds.downloadPath || '');
+            
+            const loadedPath = creds.downloadPath || '';
+            setDownloadPath(loadedPath);
+            
             const version = await window.electronAPI.getAppVersion();
             setAppVersion(version);
             setStatusMessage('Ready. Select a version to install.');
-            if (creds.downloadPath) {
-                fetchInstalledVersions();
+            
+            if (loadedPath) {
+                fetchInstalledVersions(loadedPath);
             }
         };
 
@@ -155,7 +153,9 @@ function App() {
         };
 
         const handleDownloadComplete = ({ success }) => {
-            if (success) fetchInstalledVersions();
+            if (success) {
+                fetchInstalledVersions(downloadPath);
+            }
             setIsProcessing(false);
             setCurrentDownload(null);
             setAuthPromptType(null);
@@ -186,8 +186,7 @@ function App() {
         const path = await window.electronAPI.selectFolder();
         if (path) {
             setDownloadPath(path);
-            const installed = await window.electronAPI.getInstalledVersions(path);
-            setInstalledVersions(installed);
+            fetchInstalledVersions(path); // ** FIXED: Pass new path directly **
         }
     };
 
@@ -213,7 +212,7 @@ function App() {
         const result = await window.electronAPI.uninstallVersion({ downloadPath, versionName: version.name });
         setStatusMessage(result.message);
         if (result.success) {
-            fetchInstalledVersions();
+            fetchInstalledVersions(downloadPath); // ** FIXED: Use current path **
         }
     };
 
@@ -222,7 +221,7 @@ function App() {
         const result = await window.electronAPI.factoryReset();
         setStatusMessage(result.message);
         if (result.success) {
-            fetchInstalledVersions();
+            fetchInstalledVersions(downloadPath); // ** FIXED: Use current path **
         }
     };
 
