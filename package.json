@@ -1,6 +1,6 @@
 {
   "name": "trailmakers-downloader",
-  "version": "1.5.3",
+  "version": "1.5.4",
   "description": "A tool to download old versions of Trailmakers.",
   "main": "main.js",
   "scripts": {

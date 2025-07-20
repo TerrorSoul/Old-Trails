@@ -45,7 +45,10 @@ async function setActivity(details, state) {
 const TRAILMAKERS_APP_ID = '585420';
 const TRAILMAKERS_DEPOT_ID = '585421';
 const trailmakersVersions = [
-
+    { name: "1.9.5 PvP Update: Part 1", manifestId: "3088992314067472200" },
+    { name: "1.9 Pedal to the Metal", manifestId: "4412562610966151777" },
+    { name: "1.8 Waves, Camera, Action", manifestId: "4007835113837207542" },
+    { name: "1.7.4 Now This is Podracing", manifestId: "7499996565839882351" },
     { name: "1.7 Spacebound", manifestId: "4376696831141480241" },
     { name: "1.6 Wings and Weapons", manifestId: "7868502592313023064" },
     { name: "1.5 Decals", manifestId: "6418274266282092041" },
