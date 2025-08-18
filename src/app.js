@@ -106,19 +106,19 @@ function App() {
     const [searchTerm, setSearchTerm] = useState('');
     const [username, setUsername] = useState('');
     const [password, setPassword] = useState('');
-    const [downloadPath, setDownloadPath] = useState('');
+    const [steamPath, setSteamPath] = useState('');
+    const [steamFound, setSteamFound] = useState(true); // Assume found initially to avoid flicker
+    const [isInitializing, setIsInitializing] = useState(true);
     const [isProcessing, setIsProcessing] = useState(false);
     const [currentDownload, setCurrentDownload] = useState(null);
     const [downloadProgress, setDownloadProgress] = useState(0);
-    const [statusMessage, setStatusMessage] = useState('Welcome! Please enter your details.');
+    const [statusMessage, setStatusMessage] = useState('Initializing...');
     const [authPromptType, setAuthPromptType] = useState(null);
     const [runningGame, setRunningGame] = useState(null);
 
-    const fetchInstalledVersions = async (path) => {
-        if (path) {
-            const installed = await window.electronAPI.getInstalledVersions(path);
-            setInstalledVersions(installed);
-        }
+    const fetchInstalledVersions = async () => {
+        const installed = await window.electronAPI.getInstalledVersions();
+        setInstalledVersions(installed);
     };
 
     useEffect(() => {
@@ -126,23 +126,32 @@ function App() {
             const creds = await window.electronAPI.getCredentials();
             setUsername(creds.username || '');
             setPassword(creds.password || '');
-            
-            const loadedPath = creds.downloadPath || '';
-            setDownloadPath(loadedPath);
+            setSteamPath(creds.downloadPath || '');
             
             const version = await window.electronAPI.getAppVersion();
             setAppVersion(version);
-            setStatusMessage('Ready. Select a version to install.');
             
-            if (loadedPath) {
-                fetchInstalledVersions(loadedPath);
-            }
+            fetchInstalledVersions();
         };
 
         setup();
 
         window.electronAPI.onVersionsLoaded(setVersions);
         window.electronAPI.uiReady();
+
+        const handleSteamFound = ({ path, versionsPath }) => {
+            setSteamFound(true);
+            setSteamPath(versionsPath);
+        };
+
+        const handleSteamNotFound = () => {
+            setSteamFound(false);
+            setStatusMessage('Steam Trailmakers installation not found.');
+        };
+        
+        const handleInitializationComplete = () => {
+            setIsInitializing(false);
+        };
 
         const handleStatusUpdate = (message) => {
             setStatusMessage(message);
@@ -153,19 +162,21 @@ function App() {
         };
 
         const handleDownloadComplete = ({ success }) => {
-            if (success) {
-                fetchInstalledVersions(downloadPath);
-            }
+            if (success) fetchInstalledVersions();
             setIsProcessing(false);
             setCurrentDownload(null);
             setAuthPromptType(null);
-            setStatusMessage(success ? 'Installation Complete!' : 'Download failed or was cancelled.');
-            setTimeout(() => setStatusMessage('Ready. Select a version to install.'), 5000);
+            setStatusMessage(success ? 'Installation Complete!' : 'Download failed.');
+            setTimeout(() => setStatusMessage('Ready.'), 5000);
         };
 
+        const handleRefreshVersions = () => fetchInstalledVersions();
         const handleGameLaunched = (versionName) => setRunningGame(versionName);
         const handleGameClosed = () => setRunningGame(null);
         
+        window.electronAPI.onSteamFound(handleSteamFound);
+        window.electronAPI.onSteamNotFound(handleSteamNotFound);
+        window.electronAPI.onInitializationComplete(handleInitializationComplete);
         window.electronAPI.onStatusUpdate(handleStatusUpdate);
         window.electronAPI.onDownloadProgress(({ progress }) => setDownloadProgress(progress));
         window.electronAPI.onSteamGuardRequired(() => setAuthPromptType('code'));
@@ -174,55 +185,46 @@ function App() {
         window.electronAPI.onDownloadComplete(handleDownloadComplete);
         window.electronAPI.onGameLaunched(handleGameLaunched);
         window.electronAPI.onGameClosed(handleGameClosed);
+        window.electronAPI.onRefreshInstalledVersions(handleRefreshVersions);
 
         return () => {
-            ['versions-loaded', 'status-update', 'download-progress', 'steam-guard-required', 'steam-mobile-required', 'steam-email-required', 'download-complete', 'game-launched', 'game-closed'].forEach(channel => 
-                window.electronAPI.removeAllListeners(channel)
-            );
+            [
+                'versions-loaded', 'steam-found', 'steam-not-found', 'initialization-complete',
+                'status-update', 'download-progress', 'steam-guard-required', 
+                'steam-mobile-required', 'steam-email-required', 'download-complete', 
+                'game-launched', 'game-closed', 'refresh-installed-versions'
+            ].forEach(channel => window.electronAPI.removeAllListeners(channel));
         };
     }, []);
 
-    const handleSelectFolder = async () => {
-        const path = await window.electronAPI.selectFolder();
-        if (path) {
-            setDownloadPath(path);
-            fetchInstalledVersions(path);
-        }
-    };
-
     const handleDownload = (version) => {
-        if (!username || !password || !downloadPath) {
-            setStatusMessage('Error: Username, password, and folder are required.');
-            return;
-        }
+        if (!username || !password) return setStatusMessage('Error: Username and password are required.');
+        if (!steamFound) return setStatusMessage('Error: Steam Trailmakers installation not found.');
+        
         setIsProcessing(true);
         setCurrentDownload(version.manifestId);
         setDownloadProgress(0);
         setAuthPromptType(null);
-        window.electronAPI.startDownload({ username, password, version, downloadPath });
+        window.electronAPI.startDownload({ username, password, version });
     };
 
     const handlePlay = (version) => {
         setStatusMessage(`Launching ${version.name}...`);
-        window.electronAPI.launchGame({ downloadPath, versionName: version.name });
+        window.electronAPI.launchGame({ versionName: version.name });
     };
 
     const handleUninstall = async (version) => {
         setStatusMessage(`Uninstalling ${version.name}...`);
-        const result = await window.electronAPI.uninstallVersion({ downloadPath, versionName: version.name });
+        const result = await window.electronAPI.uninstallVersion({ versionName: version.name });
         setStatusMessage(result.message);
-        if (result.success) {
-            fetchInstalledVersions(downloadPath); // ** FIXED: Use current path **
-        }
+        if (result.success) fetchInstalledVersions();
     };
 
     const handleFactoryReset = async () => {
         setStatusMessage('Waiting for confirmation...');
         const result = await window.electronAPI.factoryReset();
         setStatusMessage(result.message);
-        if (result.success) {
-            fetchInstalledVersions(downloadPath); // ** FIXED: Use current path **
-        }
+        if (result.success) fetchInstalledVersions();
     };
 
     const handleCodeSubmit = (code) => {
@@ -232,6 +234,7 @@ function App() {
     };
 
     const filteredVersions = versions.filter(v => v.name.toLowerCase().includes(searchTerm.toLowerCase()));
+    const isBusy = isProcessing || runningGame !== null || isInitializing;
 
     return (
         <div className="h-screen flex flex-col bg-gray-900 text-gray-200 select-none">
@@ -240,66 +243,89 @@ function App() {
                 <div className="w-1/3 flex-shrink-0 flex flex-col gap-4 min-w-0">
                     <div className="bg-gray-800 p-4 rounded-lg border border-gray-700/50">
                         <h2 className="text-lg font-bold text-white border-b border-gray-700 pb-2 mb-3">Settings</h2>
-                        <div className="space-y-3">
-                            <input type="text" placeholder="Steam Username" value={username} onChange={(e) => setUsername(e.target.value)} disabled={isProcessing || runningGame} className="w-full bg-gray-700 border border-gray-600 rounded-md p-2 text-sm focus:ring-2 focus:ring-cyan-500 focus:outline-none" />
-                            <input type="password" placeholder="Password" value={password} onChange={(e) => setPassword(e.target.value)} disabled={isProcessing || runningGame} className="w-full bg-gray-700 border border-gray-600 rounded-md p-2 text-sm focus:ring-2 focus:ring-cyan-500 focus:outline-none" />
-                            <button onClick={handleSelectFolder} disabled={isProcessing || runningGame} className="w-full text-left bg-gray-700 hover:bg-gray-600 border border-gray-600 rounded-md p-2 text-sm transition-colors truncate disabled:opacity-50 disabled:cursor-not-allowed">
-                                <span className="font-semibold">Path:</span> {downloadPath || 'Choose Folder...'}
-                            </button>
-                        </div>
-                    </div>
-                    
-                    {isProcessing && authPromptType && <AuthPrompt onCodeSubmit={handleCodeSubmit} type={authPromptType} />}
-                    
-                    <div className="flex-grow bg-gray-800 p-4 rounded-lg border border-gray-700/50 flex flex-col justify-center">
-                        <h3 className="text-md font-bold text-white mb-2">Status</h3>
-                        <p className="text-cyan-300 text-sm h-10">{statusMessage}</p>
-                        {isProcessing && (
-                             <div className="w-full bg-gray-700 rounded-full h-4 mt-2 shadow-inner overflow-hidden">
-                                <div className="bg-cyan-500 h-4 rounded-full transition-all duration-500" style={{ width: `${downloadProgress}%` }}></div>
-                            </div>
-                        )}
-                    </div>
-                </div>
+                        <fieldset disabled={isBusy} className="space-y-3">
+                            <input type="text" placeholder="Steam Username" value={username} onChange={(e) => setUsername(e.target.value)} className="w-full bg-gray-700 border border-gray-600 rounded-md p-2 text-sm focus:ring-2 focus:ring-cyan-500 focus:outline-none disabled:opacity-50" />
+                            <input type="password" placeholder="Password" value={password} onChange={(e) => setPassword(e.target.value)} className="w-full bg-gray-700 border border-gray-600 rounded-md p-2 text-sm focus:ring-2 focus:ring-cyan-500 focus:outline-none disabled:opacity-50" />
+                            <div className="text-sm">
+                                <span className="font-semibold">Steam Status:</span>
+                                <span className={`ml-2 ${steamFound ? 'text-green-400' : 'text-red-400'}`}>
+                                   {steamFound ? 'Found' : 'Not Found'}
+                               </span>
+                           </div>
+                           {steamPath && (
+                               <div className="text-xs text-gray-400 break-all">
+                                   <span className="font-semibold">Path:</span> {steamPath}
+                               </div>
+                           )}
+                       </fieldset>
+                   </div>
+                   
+                   {isProcessing && authPromptType && <AuthPrompt onCodeSubmit={handleCodeSubmit} type={authPromptType} />}
+                   
+                   <div className="flex-grow bg-gray-800 p-4 rounded-lg border border-gray-700/50 flex flex-col justify-center">
+                       <h3 className="text-md font-bold text-white mb-2">Status</h3>
+                       <p className="text-cyan-300 text-sm h-10">{statusMessage}</p>
+                       {(isProcessing || isInitializing) && (
+                            <div className="w-full bg-gray-700 rounded-full h-4 mt-2 shadow-inner overflow-hidden">
+                               <div 
+                                    className={`h-4 rounded-full transition-all duration-500 ${isInitializing ? 'bg-gray-500 animate-pulse' : 'bg-cyan-500'}`}
+                                    style={{ width: isInitializing ? '100%' : `${downloadProgress}%` }}>
+                               </div>
+                           </div>
+                       )}
+                   </div>
+               </div>
 
-                <div className="w-2/3 flex flex-col bg-gray-800 p-4 rounded-lg border border-gray-700/50">
-                    <div className="flex justify-between items-center border-b border-gray-700 pb-2 mb-3">
-                        <div className="flex items-center gap-3">
-                            <h2 className="text-lg font-bold text-white">Available Versions</h2>
-                            {installedVersions.length > 0 && (
-                                <button 
-                                    onClick={handleFactoryReset} 
-                                    disabled={isProcessing || runningGame}
-                                    className="p-1 rounded-full text-gray-400 hover:bg-red-800 hover:text-white disabled:text-gray-600 disabled:hover:bg-transparent disabled:cursor-not-allowed transition-colors"
-                                    title="Factory Reset All Versions"
-                                >
-                                    <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" viewBox="0 0 16 16"><path d="M8.982 1.566a1.13 1.13 0 0 0-1.96 0L.165 13.233c-.457.778.091 1.767.98 1.767h13.713c.889 0 1.438-.99.98-1.767L8.982 1.566zM8 5c.535 0 .954.462.9.995l-.35 3.507a.552.552 0 0 1-1.1 0L7.1 5.995A.905.905 0 0 1 8 5zm.002 6a1 1 0 1 1 0 2 1 1 0 0 1 0-2z"/></svg>
-                                </button>
-                            )}
-                        </div>
-                        <input type="text" placeholder="Search..." value={searchTerm} onChange={(e) => setSearchTerm(e.target.value)} className="bg-gray-700 border border-gray-600 rounded-md px-2 py-1 text-sm focus:ring-1 focus:ring-cyan-500 focus:outline-none" />
-                    </div>
-                    <div className="flex-grow space-y-3 overflow-y-auto pr-2">
-                        {filteredVersions.length > 0 ? filteredVersions.map(v => (
-                            <VersionCard
-                                key={v.manifestId}
-                                version={v}
-                                isInstalled={installedVersions.includes(v.manifestId)}
-                                isDownloading={isProcessing && currentDownload === v.manifestId}
-                                isProcessing={isProcessing}
-                                runningGame={runningGame}
-                                onDownload={() => handleDownload(v)}
-                                onPlay={() => handlePlay(v)}
-                                onUninstall={() => handleUninstall(v)}
-                            />
-                        )) : (
-                            <p className="text-center text-gray-400 mt-4">No versions found.</p>
-                        )}
-                    </div>
-                </div>
-            </div>
-        </div>
-    );
+               <div className="w-2/3 flex flex-col bg-gray-800 p-4 rounded-lg border border-gray-700/50">
+                   <div className="flex justify-between items-center border-b border-gray-700 pb-2 mb-3">
+                       <div className="flex items-center gap-3">
+                           <h2 className="text-lg font-bold text-white">Available Versions</h2>
+                           {installedVersions.length > 0 && (
+                               <button 
+                                   onClick={handleFactoryReset} 
+                                   disabled={isBusy}
+                                   className="p-1 rounded-full text-gray-400 hover:bg-red-800 hover:text-white disabled:text-gray-600 disabled:hover:bg-transparent disabled:cursor-not-allowed transition-colors"
+                                   title="Factory Reset All Versions"
+                               >
+                                   <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" viewBox="0 0 16 16"><path d="M8.982 1.566a1.13 1.13 0 0 0-1.96 0L.165 13.233c-.457.778.091 1.767.98 1.767h13.713c.889 0 1.438-.99.98-1.767L8.982 1.566zM8 5c.535 0 .954.462.9.995l-.35 3.507a.552.552 0 0 1-1.1 0L7.1 5.995A.905.905 0 0 1 8 5zm.002 6a1 1 0 1 1 0 2 1 1 0 0 1 0-2z"/></svg>
+                               </button>
+                           )}
+                       </div>
+                       <input type="text" placeholder="Search..." value={searchTerm} onChange={(e) => setSearchTerm(e.target.value)} className="bg-gray-700 border border-gray-600 rounded-md px-2 py-1 text-sm focus:ring-1 focus:ring-cyan-500 focus:outline-none" />
+                   </div>
+                   <div className="flex-grow space-y-3 overflow-y-auto pr-2">
+                       {!steamFound ? (
+                           <div className="text-center text-gray-400 mt-8">
+                               <svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" fill="currentColor" className="mx-auto mb-4 text-gray-600" viewBox="0 0 16 16">
+                                   <path d="M8.982 1.566a1.13 1.13 0 0 0-1.96 0L.165 13.233c-.457.778.091 1.767.98 1.767h13.713c.889 0 1.438-.99.98-1.767L8.982 1.566zM8 5c.535 0 .954.462.9.995l-.35 3.507a.552.552 0 0 1-1.1 0L7.1 5.995A.905.905 0 0 1 8 5zm.002 6a1 1 0 1 1 0 2 1 1 0 0 1 0-2z"/>
+                               </svg>
+                               <p className="text-lg font-semibold mb-2">Steam Trailmakers Not Found</p>
+                               <p className="text-sm">Please install Trailmakers through Steam, then restart this application.</p>
+                           </div>
+                       ) : isInitializing ? (
+                            <div className="text-center text-gray-400 mt-8">
+                                <p>Loading...</p>
+                            </div>
+                       ) : filteredVersions.length > 0 ? filteredVersions.map(v => (
+                           <VersionCard
+                               key={v.manifestId}
+                               version={v}
+                               isInstalled={installedVersions.includes(v.manifestId)}
+                               isDownloading={isProcessing && currentDownload === v.manifestId}
+                               isProcessing={isBusy}
+                               runningGame={runningGame}
+                               onDownload={() => handleDownload(v)}
+                               onPlay={() => handlePlay(v)}
+                               onUninstall={() => handleUninstall(v)}
+                           />
+                       )) : (
+                           <p className="text-center text-gray-400 mt-4">No versions found.</p>
+                       )}
+                   </div>
+               </div>
+           </div>
+       </div>
+   );
 }
 
 const root = ReactDOM.createRoot(document.getElementById('root'));
