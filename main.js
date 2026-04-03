@@ -117,17 +117,18 @@ const clearDir = async (dirPath, exceptions = []) => {
     }
 };
 
-const copyDirRecursive = async (src, dest) => {
+const copyDirRecursive = async (src, dest, exceptions = []) => {
     if (!fs.existsSync(src)) return;
     try {
         await fsp.mkdir(dest, { recursive: true });
         const entries = await fsp.readdir(src, { withFileTypes: true });
         for (let entry of entries) {
+            if (exceptions.includes(entry.name)) continue;
             const srcPath = path.join(src, entry.name);
             const destPath = path.join(dest, entry.name);
             try {
                 if (entry.isDirectory()) {
-                    await copyDirRecursive(srcPath, destPath);
+                    await copyDirRecursive(srcPath, destPath, exceptions);
                 } else {
                     await fsp.copyFile(srcPath, destPath);
                 }
@@ -519,7 +520,7 @@ const backupMainSave = async () => {
         await fsp.mkdir(path.join(MAIN_BACKUP_PATH, 'Documents'), { recursive: true });
 
         if (fs.existsSync(LOCAL_LOW_PATH)) await copyDirRecursive(LOCAL_LOW_PATH, path.join(MAIN_BACKUP_PATH, 'LocalLow'));
-        if (fs.existsSync(DOCUMENTS_PATH)) await copyDirRecursive(DOCUMENTS_PATH, path.join(MAIN_BACKUP_PATH, 'Documents'));
+        if (fs.existsSync(DOCUMENTS_PATH)) await copyDirRecursive(DOCUMENTS_PATH, path.join(MAIN_BACKUP_PATH, 'Documents'), ['OldTrails', 'replay_gifs']);
         console.log('Main save backup complete.');
     } catch (error) {
         console.error('Failed to create main save backup:', error);
@@ -532,14 +533,14 @@ const restoreMainSave = async () => {
     try {
         await new Promise(resolve => setTimeout(resolve, 1000));
         await clearDir(LOCAL_LOW_PATH);
-        await clearDir(DOCUMENTS_PATH, ['OldTrails', 'Blueprints']);
+        await clearDir(DOCUMENTS_PATH, ['OldTrails', 'Blueprints', 'replay_gifs']);
         await copyDirRecursive(path.join(MAIN_BACKUP_PATH, 'LocalLow'), LOCAL_LOW_PATH);
         
         const mainBackupDocs = path.join(MAIN_BACKUP_PATH, 'Documents');
         if (fs.existsSync(mainBackupDocs)) {
             const entries = await fsp.readdir(mainBackupDocs, { withFileTypes: true });
             for (const entry of entries) {
-                if (entry.name === 'Blueprints') continue; // Do not overwrite live blueprints
+                if (entry.name === 'Blueprints' || entry.name === 'replay_gifs') continue; // Do not overwrite live blueprints
                 const src = path.join(mainBackupDocs, entry.name);
                 const dest = path.join(DOCUMENTS_PATH, entry.name);
                 if (entry.isDirectory()) {
@@ -563,7 +564,7 @@ const prepareVersionSave = async (versionName) => {
     const liveBlueprintsPath = path.join(DOCUMENTS_PATH, 'Blueprints');
 
     await clearDir(LOCAL_LOW_PATH);
-    await clearDir(DOCUMENTS_PATH, ['OldTrails', 'Blueprints']);
+    await clearDir(DOCUMENTS_PATH, ['OldTrails', 'Blueprints', 'replay_gifs']);
     await mergeDirRecursive(masterBackupBlueprintsPath, liveBlueprintsPath);
 
     if (fs.existsSync(versionSavePath)) {
@@ -574,7 +575,7 @@ const prepareVersionSave = async (versionName) => {
         if (fs.existsSync(versionSaveDocs)) {
             const entries = await fsp.readdir(versionSaveDocs, { withFileTypes: true });
             for (const entry of entries) {
-                if (entry.name === 'Blueprints') continue;
+                if (entry.name === 'Blueprints' || entry.name === 'replay_gifs') continue;
                 const src = path.join(versionSaveDocs, entry.name);
                 const dest = path.join(DOCUMENTS_PATH, entry.name);
                 if (entry.isDirectory()) {
@@ -612,7 +613,7 @@ const saveVersionSession = async (versionName) => {
 
         const docEntries = await fsp.readdir(DOCUMENTS_PATH, { withFileTypes: true });
         for (const entry of docEntries) {
-            if (entry.name === 'Blueprints' || entry.name === 'OldTrails') continue;
+            if (entry.name === 'Blueprints' || entry.name === 'OldTrails' || entry.name === 'replay_gifs') continue;
             const src = path.join(DOCUMENTS_PATH, entry.name);
             const dest = path.join(versionSaveDocs, entry.name);
             if (entry.isDirectory()) {
